@@ -1,0 +1,138 @@
+#!/usr/bin/env python
+import gym 
+import os
+import json
+#import safety_gym
+import safe_rl
+from safe_rl.utils.run_utils import setup_logger_kwargs
+from safe_rl.utils.mpi_tools import mpi_fork
+from rlkit.envs.wrappers import NormalizedBoxEnv
+from rlkit.envs import ENVS
+from configs.default import default_config
+
+def deep_update_dict(fr, to):
+    ''' update dict of dicts with new values '''
+    # assume dicts have same keys
+    for k, v in fr.items():
+        if type(v) is dict:
+            deep_update_dict(v, to[k])
+        else:
+            to[k] = v
+    return to
+
+def main(task, algo, goal, seed, cpu):
+
+    # Verify experiment
+    #robot_list = ['point', 'car', 'doggo']
+    task_list = ['ant-dir-safe', 'cheetah-vel-safe', 'humanoid-circle-safe', 'point-robot-safe', 'ant-circle-safe', 
+                 'humanoid-dir-safe', 'ant-goal-safe', 'humanoid-goal-safe', 'cheetah-walk-safe', 'humanoid-walk-safe',
+                 'car-circle-safe', 'doggo-circle-safe', 'point-circle-safe']
+    algo_list = ['ppo', 'ppo_lagrangian', 'trpo', 'trpo_lagrangian', 'cpo']
+    goal_list = [0,1,2,3,4]
+
+    algo = algo.lower()
+    #task = task.capitalize()
+    assert algo in algo_list, "Invalid algo"
+    assert task.lower() in task_list, "Invalid task"
+    assert goal in goal_list
+
+
+    # Hyperparameters
+    exp_name = algo + '_' + task + '_goal_'+ str(goal)
+    num_steps = 3e7
+    steps_per_epoch = 6000
+    if task=="point-robot-safe":
+        num_steps=1e7
+        steps_per_epoch=5000
+    elif task=="ant-circle-safe" or task=="car-circle-safe" or task=="humanoid-dir-safe" or task=="point-circle-safe":
+        num_steps=1.8e7
+    elif task=="cheetah-walk-safe":
+        num_steps=6e5
+    elif task=="humanoid-walk-safe":
+        num_steps=9e7
+    epochs = int(num_steps / steps_per_epoch)
+    save_freq = 50
+    target_kl = 0.01
+    cost_lim = 25
+    if task=="point-robot-safe":
+        cost_lim = 10
+    if task=="humanoid-goal-safe":
+        cost_lim = 15
+    if task=="cheetah-walk-safe":
+        cost_lim = 10
+    # if "humanoid" in task:
+    #     cost_lim = 20
+
+    # Fork for parallelizing
+    mpi_fork(cpu)
+
+    # Prepare Logger
+    logger_kwargs = setup_logger_kwargs(exp_name, seed)
+
+    # Algo and Env
+    algo = eval('safe_rl.'+algo)
+    variant = default_config
+    config="configs/"+task+".json"
+    #cwd = os.getcwd()
+    #files = os.listdir(cwd)
+    if config:
+        with open(os.path.join(config)) as f:
+            exp_params = json.load(f)
+        variant = deep_update_dict(exp_params, variant)
+    variant['util_params']['gpu_id'] = 0
+    env = NormalizedBoxEnv(ENVS[variant['env_name']](**variant['env_params']))
+    env.seed(seed)
+    env.reset_task(goal)
+    print(env._goal)
+    env_name=task+"_"+str(goal)
+    max_ep_len=300
+    data_save_start=1000
+    data_save_freq=10
+    traj_per_ep=10
+    if task=="point-robot-safe":
+        max_ep_len=200
+        data_save_start=200
+    elif task=="cheetah-walk-safe":
+        data_save_start=0
+        data_save_freq=1
+        traj_per_ep=5
+    elif task=="humanoid-walk-safe":
+        data_save_start=10000
+    elif task=="car-circle-safe" or task=="doggo-circle-safe" or task=="point-circle-safe":
+        max_ep_len=500
+    elif task=="humanoid-dir-safe":
+        max_ep_len=200
+
+    algo(env_fn=None,
+         ac_kwargs=dict(
+             hidden_sizes=(256, 256),
+            ),
+         epochs=epochs,
+         steps_per_epoch=steps_per_epoch,
+         save_freq=save_freq,
+         target_kl=target_kl,
+         cost_lim=cost_lim,
+         seed=seed,
+         logger_kwargs=logger_kwargs,
+         env=env,
+         max_ep_len=max_ep_len,
+         env_name=env_name,
+         data_save_freq=data_save_freq,
+         data_save_start=data_save_start,
+         traj_per_ep=traj_per_ep,
+         save_data=True
+         )
+
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--task', type=str, default='ant-dir-safe')
+    parser.add_argument('--algo', type=str, default='cpo')
+    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--goal', type=int, default=0)
+    parser.add_argument('--cpu', type=int, default=1)
+    args = parser.parse_args()
+    #exp_name = args.exp_name if not(args.exp_name=='') else None
+    main(args.task, args.algo, args.goal, args.seed, args.cpu)
